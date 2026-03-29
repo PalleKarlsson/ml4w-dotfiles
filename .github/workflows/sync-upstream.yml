@@ -1,0 +1,17 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # Daily at 06:00 UTC
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync upstream
+        run: |
+          gh api repos/PalleKarlsson/ml4w-dotfiles/merge-upstream \
+            -X POST -f branch=main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
