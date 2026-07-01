@@ -1,5 +1,6 @@
 import Quickshell
 import Quickshell.Wayland
+import Quickshell.Hyprland
 import Quickshell.Io
 import QtQuick
 import QtQuick.Layouts
@@ -11,15 +12,24 @@ PanelWindow {
 
     // --- WAYLAND CONFIGURATION ---
     WlrLayershell.layer: WlrLayer.Top
-    // Grab the keyboard while expanded so the IPC toggle (SUPER + SPACE) can
-    // focus the bar for Left/Right/Return navigation without touching the
-    // mouse. Exclusive is required for this programmatic grab; to keep apps
-    // usable, expanded mode behaves like a transient menu: it auto-collapses
-    // (releasing the keyboard) as soon as a module is run (Return) or the
-    // user cancels (Escape).
-    WlrLayershell.keyboardFocus: root.barExpanded
-        ? WlrKeyboardFocus.Exclusive
-        : WlrKeyboardFocus.None
+    // Keyboard focus is owned by the HyprlandFocusGrab below (the same primitive
+    // the Calendar/Power popups use), not by the layer-shell focus mode. A
+    // WlrKeyboardFocus.Exclusive grab held the keyboard until Escape and left
+    // running apps dead; OnDemand never grabbed from the keybinding at all. The
+    // focus grab gives the bar the keyboard while expanded *and* fires onCleared
+    // when the pointer/keyboard goes to another window, which is what hands focus
+    // back to the app (and collapses the bar). Leave the layer-shell mode at its
+    // default (None) so the two mechanisms don't fight.
+
+    // Grabs the keyboard for the bar while it is expanded so SUPER + SPACE can
+    // drive Left/Right/Return navigation, and releases it the moment the user
+    // interacts with another window (clicking/entering an app) — which returns
+    // the keyboard to that app and collapses the bar.
+    HyprlandFocusGrab {
+        windows: [root]
+        active: root.barExpanded
+        onCleared: root.barExpanded = false
+    }
 
     // --- USER SETTINGS ---
     // Loaded from ~/.config/ml4w/settings/statusbar.json. The object holds the
@@ -30,7 +40,7 @@ PanelWindow {
         "pill":   { "collapsedWidth": 0, "expandedWidth": 680, "radius": 12, "animationDuration": 350 },
         "modules":{ "left": ["terminal", "workspaces"],
                     "center": ["launcher", "clock", "swaync"],
-                    "right": ["updates", "systemtray", "logo", "power"] },
+                    "right": ["updates", "volume", "systemtray", "logo", "power"] },
         "border": { "width": 2, "colorTop": "", "colorBottom": "" },
         "opacity":{ "collapsed": 0.5, "expanded": 0.8 },
         "clock":  { "format": "HH:mm" }
@@ -103,8 +113,10 @@ PanelWindow {
         applySettings(updated)
     }
 
-    // Keep the pill expanded regardless of hover. Toggled via IPC
-    // ("qs ipc call statusbar expand") and bound to SUPER + SPACE in Hyprland.
+    // Keep the pill expanded regardless of hover. Set via IPC
+    // ("qs ipc call statusbar focus") which is bound to SUPER + SPACE in
+    // Hyprland, and cleared on Escape, after running a module, or when the
+    // focus grab is released because the user interacted with another window.
     property bool barExpanded: false
 
     // When set in statusbar.json the pill never collapses: it stays in its
@@ -127,16 +139,28 @@ PanelWindow {
         }
     }
     Component { id: cSwaync;     SwayncModule {} }
+    // True while a system-tray context menu is open. Kept at window scope so
+    // the pill can pin itself expanded while a menu is up (the tray lives in
+    // the right area, which only exists while expanded).
+    property bool trayMenuOpen: false
     Component {
         id: cSystemTray
         SystemTrayModule {
             // Rebuild keyboard navigation when the tray empties or repopulates
             // (it collapses out of the layout when it has no items).
             onCollapsedChanged: Qt.callLater(root.rebuildNavItems)
+            // Surface the open-menu state up to the window so the pill stays
+            // expanded for as long as a tray menu is showing.
+            Binding {
+                target: root
+                property: "trayMenuOpen"
+                value: menuOpen
+            }
         }
     }
     Component { id: cLogo;       Ml4wLogoModule {} }
     Component { id: cPower;      PowerModule {} }
+    Component { id: cVolume;     VolumeModule {} }
     Component {
         id: cUpdates
         UpdatesModule {
@@ -155,7 +179,8 @@ PanelWindow {
         "systemtray": cSystemTray,
         "logo":       cLogo,
         "power":      cPower,
-        "updates":    cUpdates
+        "updates":    cUpdates,
+        "volume":     cVolume
     })
 
     // --- KEYBOARD NAVIGATION ---
@@ -237,6 +262,17 @@ PanelWindow {
         root.focusIndex = (root.focusIndex + dir + n) % n
     }
 
+    // Forward an Up/Down press to the keyboard-selected module if it exposes a
+    // step() function (e.g. the volume module), so the arrows adjust it in place
+    // without leaving keyboard-navigation mode.
+    function stepFocused(dir: int): void {
+        if (root.focusIndex < 0 || root.focusIndex >= root.navItems.length)
+            return
+        let m = root.navItems[root.focusIndex]
+        if (typeof m.step === "function")
+            m.step(dir)
+    }
+
     function activateFocused(): void {
         if (root.focusIndex >= 0 && root.focusIndex < root.navItems.length)
             root.navItems[root.focusIndex].activate()
@@ -254,6 +290,14 @@ PanelWindow {
         function disable(): void { root.setEnabled(false) }
         // Re-read statusbar.json from disk (used by the SidebarApp switch).
         function refresh(): void { root.reloadSettings() }
+        // Expand the bar (if needed) and grab the keyboard for navigation.
+        // Bound to SUPER + SPACE. Idempotent: when the bar is already expanded
+        // it only re-grabs keyboard focus instead of toggling back to collapsed,
+        // so the keybinding always lands in keyboard-navigation mode.
+        function focus(): void {
+            root.barExpanded = true
+            keyHandler.forceActiveFocus()
+        }
         // Toggle between collapsed and expanded mode.
         function expand(): void { root.barExpanded = !root.barExpanded }
         function collapse(): void { root.barExpanded = false }
@@ -289,7 +333,7 @@ PanelWindow {
 
         // Collapsed = sized to content, Expanded = fixed width.
         property bool expanded: hoverHandler.hovered || root.barExpanded
-            || root.alwaysExpanded
+            || root.alwaysExpanded || root.trayMenuOpen
         // 0 in the settings file means "hug the center content".
         property real collapsedWidth: root.settings.pill.collapsedWidth > 0
             ? root.settings.pill.collapsedWidth
@@ -334,10 +378,13 @@ PanelWindow {
         // Captures arrow keys (navigate), Return (execute) and Escape
         // (collapse) while the bar is in expanded mode.
         FocusScope {
+            id: keyHandler
             anchors.fill: parent
             focus: root.barExpanded
             Keys.onLeftPressed: root.moveFocus(-1)
             Keys.onRightPressed: root.moveFocus(1)
+            Keys.onUpPressed: root.stepFocused(1)
+            Keys.onDownPressed: root.stepFocused(-1)
             Keys.onReturnPressed: root.activateFocused()
             Keys.onEnterPressed: root.activateFocused()
             Keys.onEscapePressed: root.barExpanded = false
