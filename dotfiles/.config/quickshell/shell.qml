@@ -5,7 +5,6 @@ import Quickshell.Io
 import "WelcomeApp"
 import "PowerApp"
 import "SidebarApp"
-import "CalendarApp"
 import "WallpaperApp"
 import "StatusbarApp"
 import "DockApp"
@@ -24,9 +23,8 @@ ShellRoot {
     WelcomeWindow {}
     PowerWindow {}
     SidebarWindow {}
-    CalendarWindow {}
     WallpaperWindow {}
     StatusbarWindow {}
-    // Creates the dock window only while the dock is enabled in dock.json.
+    // Creates the dock window only while the dock is enabled in its config.json.
     DockLoader {}
 }
