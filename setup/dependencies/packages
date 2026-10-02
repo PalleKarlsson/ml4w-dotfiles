@@ -41,10 +41,8 @@ slurp
 cliphist
 gvfs
 grim
-breeze
-tesseract
 wl-clipboard
 btop
 cargo
 eza
-libsecret
+quickshell
